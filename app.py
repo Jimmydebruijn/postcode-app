@@ -6,10 +6,12 @@ import plotly.express as px
 
 st.set_page_config(page_title="Postcode Vergelijker", page_icon="📍", layout="wide")
 st.title("📍 Postcode Demografische Vergelijker")
-st.caption("Bron: CBS StatLine 83502NED — open data (CC BY 4.0)")
+st.caption("Bron: CBS StatLine — open data (CC BY 4.0)")
 
 BASE     = "https://opendata.cbs.nl/ODataApi/OData/83502NED"
 INK_BASE = "https://opendata.cbs.nl/ODataApi/OData/85064NED"
+HH_BASE  = "https://opendata.cbs.nl/ODataApi/OData/83505NED"
+HK_BASE  = "https://opendata.cbs.nl/ODataApi/OData/85640NED"
 
 LABEL_MAP = {
     "0 tot 5 jaar":"0-5","5 tot 10 jaar":"5-10","10 tot 15 jaar":"10-15",
@@ -32,7 +34,7 @@ COLORS_PC  = ["#1D9E75","#534AB7","#D85A30","#378ADD","#993556"]
 COLOR_STAD = "#185FA5"
 COLOR_NL   = "#888780"
 
-# ── CBS helpers ────────────────────────────────────────────────────────────────
+# ── Generic fetch ──────────────────────────────────────────────────────────────
 @st.cache_data(ttl=3600)
 def fetch(url):
     rows, nxt = [], url
@@ -44,6 +46,7 @@ def fetch(url):
         nxt = d.get("odata.nextLink")
     return rows
 
+# ── Leeftijd meta + data ───────────────────────────────────────────────────────
 @st.cache_data(ttl=3600)
 def get_meta():
     perioden      = fetch(f"{BASE}/Perioden?$format=json")
@@ -59,31 +62,99 @@ def get_meta():
     return periode_key, periode_title, leeftijd_map, leeftijd_keys, geslacht_key, pc_key_map
 
 @st.cache_data(ttl=3600)
-def get_verd(pc_key, periode_key, geslacht_key, leeftijd_keys, leeftijd_map):
-    resultaten = {}
+def get_leeftijd_verd(pc_key, periode_key, geslacht_key, leeftijd_keys, leeftijd_map):
+    out = {}
     for lkey in leeftijd_keys:
         obs = fetch(
             f"{BASE}/TypedDataSet?$format=json"
-            f"&$filter=Perioden eq '{periode_key}'"
-            f" and Geslacht eq '{geslacht_key}'"
-            f" and Postcode eq '{pc_key}'"
-            f" and Leeftijd eq '{lkey}'"
+            f"&$filter=Perioden eq '{periode_key}' and Geslacht eq '{geslacht_key}'"
+            f" and Postcode eq '{pc_key}' and Leeftijd eq '{lkey}'"
             f"&$select=Leeftijd,Bevolking_1"
         )
         for row in obs:
             label = LABEL_MAP.get(leeftijd_map.get(row.get("Leeftijd","").strip(),""))
             if label:
-                resultaten[label] = resultaten.get(label,0) + (row.get("Bevolking_1") or 0)
-    return resultaten
+                out[label] = out.get(label,0) + (row.get("Bevolking_1") or 0)
+    return out
 
-# ── PDOK helpers ───────────────────────────────────────────────────────────────
+# ── Huishoudens ────────────────────────────────────────────────────────────────
+@st.cache_data(ttl=3600)
+def get_hh_meta():
+    perioden  = fetch(f"{HH_BASE}/Perioden?$format=json")
+    per_key   = perioden[-1]["Key"]
+    per_title = perioden[-1]["Title"].strip()
+    hh_typen  = fetch(f"{HH_BASE}/Huishoudenssamenstelling?$format=json")
+    hh_map    = {h["Key"].strip(): h["Title"].strip() for h in hh_typen}
+    alle_pc   = fetch(f"{HH_BASE}/Postcode?$format=json")
+    pc_map    = {item["Title"].strip(): item["Key"] for item in alle_pc}
+    return per_key, per_title, hh_map, pc_map
+
+@st.cache_data(ttl=3600)
+def get_hh_data(pc_key, periode_key):
+    obs = fetch(
+        f"{HH_BASE}/TypedDataSet?$format=json"
+        f"&$filter=Perioden eq '{periode_key}' and Postcode eq '{pc_key}'"
+        f"&$select=Huishoudenssamenstelling,ParticuliereHuishoudens_1,GemiddeldeHuishoudensgrootte_2"
+    )
+    return obs
+
+# ── Herkomst ───────────────────────────────────────────────────────────────────
+# Relevante herkomstland-categorieën (hoofdniveaus)
+HK_GEWENST = {
+    "Totaal": "Totaal",
+    "Nederland": "Nederland",
+    "Europa (exclusief Nederland)": "Europa (excl. NL)",
+    "Buiten Europa": "Buiten Europa",
+    "Afrika": "Afrika",
+    "Amerika": "Amerika",
+    "Azië": "Azië",
+    "Turkije": "Turkije",
+    "Marokko": "Marokko",
+    "Suriname": "Suriname",
+}
+
+@st.cache_data(ttl=3600)
+def get_hk_meta():
+    perioden   = fetch(f"{HK_BASE}/Perioden?$format=json")
+    per_key    = perioden[-1]["Key"]
+    per_title  = perioden[-1]["Title"].strip()
+    hk_landen  = fetch(f"{HK_BASE}/Herkomstland?$format=json")
+    hk_map     = {h["Key"].strip(): h["Title"].strip() for h in hk_landen}
+    gb_landen  = fetch(f"{HK_BASE}/Geboorteland?$format=json")
+    # Gebruik "Totaal" geboorteland
+    gb_totaal  = next((g["Key"] for g in gb_landen if "Totaal" in g["Title"]), None)
+    geslachten = fetch(f"{HK_BASE}/Geslacht?$format=json")
+    gsl_key    = next(g["Key"] for g in geslachten if "Totaal" in g["Title"])
+    alle_pc    = fetch(f"{HK_BASE}/Postcode?$format=json")
+    pc_map     = {item["Title"].strip(): item["Key"] for item in alle_pc}
+    return per_key, per_title, hk_map, gb_totaal, gsl_key, pc_map
+
+@st.cache_data(ttl=3600)
+def get_hk_data(pc_key, periode_key, gb_totaal, gsl_key, hk_map):
+    obs = fetch(
+        f"{HK_BASE}/TypedDataSet?$format=json"
+        f"&$filter=Perioden eq '{periode_key}'"
+        f" and Geboorteland eq '{gb_totaal}'"
+        f" and Geslacht eq '{gsl_key}'"
+        f" and Postcode eq '{pc_key}'"
+        f"&$select=Herkomstland,Bevolking_1"
+    )
+    result = {}
+    for row in obs:
+        hkey  = row.get("Herkomstland","").strip()
+        titel = hk_map.get(hkey,"")
+        if titel in HK_GEWENST:
+            label = HK_GEWENST[titel]
+            result[label] = (row.get("Bevolking_1") or 0)
+    return result
+
+# ── PDOK ───────────────────────────────────────────────────────────────────────
 @st.cache_data(ttl=3600)
 def get_locatie(pc):
     try:
         r = requests.get(
             "https://api.pdok.nl/bzk/locatieserver/search/v3_1/free",
-            params={"q": pc, "fq": "type:postcode", "rows": 1,
-                    "fl": "woonplaatsnaam,gemeentenaam"},
+            params={"q": pc, "fq": "type:postcode", "rows": 1, "fl": "woonplaatsnaam,gemeentenaam"},
             timeout=8
         )
         if r.status_code == 200:
@@ -139,7 +210,7 @@ def pct(verd):
     tot = sum(verd.values())
     return {k: v/tot*100 for k,v in verd.items()} if tot else {}
 
-# ── Input ──────────────────────────────────────────────────────────────────────
+# ── INPUT ──────────────────────────────────────────────────────────────────────
 col_in, _ = st.columns([2,2])
 with col_in:
     invoer = st.text_input("Postcodes (komma-gescheiden)",
@@ -167,7 +238,6 @@ if gemeente and gemeente != woonplaats:
     titel += f" (gemeente {gemeente})"
 st.subheader(titel)
 
-# Stad-postcodes ophalen
 stad_pcs = []
 if woonplaats:
     with st.spinner(f"Postcodes van {woonplaats} ophalen..."):
@@ -175,24 +245,22 @@ if woonplaats:
 
 st.caption(f"Peiljaar: {periode_title} | {woonplaats}: {len(stad_pcs)} postcodes | Nederland: CBS totaalcijfer")
 
-# Data ophalen — postcodes + stad
+# Leeftijdsdata ophalen
 alle_nodig = list(set(pcs + stad_pcs))
 verdelingen = {}
-progress = st.progress(0, text="Data ophalen...")
+progress = st.progress(0, text="Leeftijdsdata ophalen...")
 for i, pc in enumerate(alle_nodig):
     progress.progress((i+1)/len(alle_nodig), text=f"Postcode {pc}...")
     key = pc_key_map.get(pc)
     if not key: continue
-    v = get_verd(key, periode_key, geslacht_key, leeftijd_keys, leeftijd_map)
+    v = get_leeftijd_verd(key, periode_key, geslacht_key, leeftijd_keys, leeftijd_map)
     if v: verdelingen[pc] = v
 
-# Nederland via NL01 — één call
 nl_verd = {}
 with st.spinner("Nederland ophalen..."):
     nl_key = pc_key_map.get("Nederland")
     if nl_key:
-        nl_verd = get_verd(nl_key, periode_key, geslacht_key, leeftijd_keys, leeftijd_map)
-
+        nl_verd = get_leeftijd_verd(nl_key, periode_key, geslacht_key, leeftijd_keys, leeftijd_map)
 progress.empty()
 
 gevonden = [pc for pc in pcs if pc in verdelingen]
@@ -202,7 +270,6 @@ if not gevonden:
 
 stad_verd = combineer([verdelingen[pc] for pc in stad_pcs if pc in verdelingen])
 
-# ── Benchmarks ─────────────────────────────────────────────────────────────────
 benchmarks = []
 for i, pc in enumerate(gevonden):
     benchmarks.append((f"Postcode {pc}", verdelingen[pc], COLORS_PC[i % len(COLORS_PC)]))
@@ -211,123 +278,272 @@ if stad_verd:
 if nl_verd:
     benchmarks.append(("⌀ Nederland", nl_verd, COLOR_NL))
 
-# ── Kerncijfers ────────────────────────────────────────────────────────────────
-st.divider()
-st.subheader(f"Kerncijfers — {periode_title}")
-cols = st.columns(len(benchmarks))
-for i, (label, verd, kleur) in enumerate(benchmarks):
-    s = stats(verd)
-    if s:
-        with cols[i]:
-            st.markdown(f"<span style='color:{kleur};font-weight:500'>{label}</span>",
-                        unsafe_allow_html=True)
-            st.metric("Inwoners",      f"{int(s['totaal']):,}".replace(",","."))
-            st.metric("Gem. leeftijd", f"{s['gem']:.1f} jaar")
-            st.metric("Aandeel 65+",  f"{s['p65']:.1f}%")
-            st.metric("Aandeel 0-25", f"{s['p025']:.1f}%")
+# ── TABS ───────────────────────────────────────────────────────────────────────
+tab1, tab2, tab3, tab4 = st.tabs(["👥 Leeftijd", "🏠 Huishoudens", "🌍 Herkomst", "💶 Inkomen"])
 
-# ── Leeftijdsopbouw vergelijking ───────────────────────────────────────────────
-st.divider()
-st.subheader("Leeftijdsopbouw vergelijking")
-kleurmap      = {lbl: klr for lbl,_,klr in benchmarks}
-reeksvolgorde = [lbl for lbl,_,_ in benchmarks]
-plot_data = []
-for label, verd, _ in benchmarks:
-    p = pct(verd)
-    for lbl in LABELS_VOLGORDE:
-        plot_data.append({"Leeftijdsgroep":lbl,"Percentage":round(p.get(lbl,0),1),"Reeks":label})
+# ════════════════════════════════════════════════════════════
+with tab1:
+    st.subheader(f"Kerncijfers — {periode_title}")
+    cols = st.columns(len(benchmarks))
+    for i, (label, verd, kleur) in enumerate(benchmarks):
+        s = stats(verd)
+        if s:
+            with cols[i]:
+                st.markdown(f"<span style='color:{kleur};font-weight:500'>{label}</span>",
+                            unsafe_allow_html=True)
+                st.metric("Inwoners",      f"{int(s['totaal']):,}".replace(",","."))
+                st.metric("Gem. leeftijd", f"{s['gem']:.1f} jaar")
+                st.metric("Aandeel 65+",  f"{s['p65']:.1f}%")
+                st.metric("Aandeel 0-25", f"{s['p025']:.1f}%")
 
-fig = px.bar(pd.DataFrame(plot_data), x="Leeftijdsgroep", y="Percentage",
-             color="Reeks", barmode="group",
-             color_discrete_map=kleurmap,
-             category_orders={"Reeks":reeksvolgorde},
-             labels={"Percentage":"% van inwoners"}, height=440)
-fig.update_layout(
-    plot_bgcolor="white", paper_bgcolor="white",
-    yaxis=dict(showgrid=True, gridcolor="#eee"),
-    xaxis=dict(tickangle=-45),
-    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-    margin=dict(t=60, b=60),
-)
-st.plotly_chart(fig, use_container_width=True)
-
-# ── Afwijkingsgrafiek ──────────────────────────────────────────────────────────
-ref_opties = []
-if nl_verd:   ref_opties.append("⌀ Nederland")
-if stad_verd: ref_opties.append(f"⌀ {woonplaats}")
-
-if ref_opties:
     st.divider()
-    ref_keuze = st.radio("Afwijking t.o.v.:", ref_opties, horizontal=True)
-    ref_verd  = {"⌀ Nederland": nl_verd,
-                 f"⌀ {woonplaats}": stad_verd}.get(ref_keuze, nl_verd)
-    st.caption("Positief = hogere concentratie dan referentie, negatief = lager")
-
-    pct_ref  = pct(ref_verd)
-    afw_data = []
-    for pc in gevonden:
-        p = pct(verdelingen[pc])
+    st.subheader("Leeftijdsopbouw")
+    kleurmap      = {lbl: klr for lbl,_,klr in benchmarks}
+    reeksvolgorde = [lbl for lbl,_,_ in benchmarks]
+    plot_data = []
+    for label, verd, _ in benchmarks:
+        p = pct(verd)
         for lbl in LABELS_VOLGORDE:
-            afw_data.append({
-                "Leeftijdsgroep": lbl,
-                "Afwijking (%-punt)": round(p.get(lbl,0) - pct_ref.get(lbl,0), 1),
-                "Postcode": f"Postcode {pc}",
-            })
+            plot_data.append({"Leeftijdsgroep":lbl,"Percentage":round(p.get(lbl,0),1),"Reeks":label})
 
-    fig2 = px.bar(pd.DataFrame(afw_data), x="Leeftijdsgroep", y="Afwijking (%-punt)",
-                  color="Postcode", barmode="group",
-                  color_discrete_map={f"Postcode {pc}": COLORS_PC[i%len(COLORS_PC)]
-                                      for i,pc in enumerate(gevonden)},
-                  height=380)
-    fig2.add_hline(y=0, line_color="#333", line_width=1)
-    fig2.update_layout(
-        plot_bgcolor="white", paper_bgcolor="white",
-        yaxis=dict(showgrid=True, gridcolor="#eee", zeroline=False),
-        xaxis=dict(tickangle=-45),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02),
-        margin=dict(t=60, b=60),
-    )
-    st.plotly_chart(fig2, use_container_width=True)
+    fig = px.bar(pd.DataFrame(plot_data), x="Leeftijdsgroep", y="Percentage",
+                 color="Reeks", barmode="group", color_discrete_map=kleurmap,
+                 category_orders={"Reeks":reeksvolgorde},
+                 labels={"Percentage":"% van inwoners"}, height=420)
+    fig.update_layout(plot_bgcolor="white", paper_bgcolor="white",
+                      yaxis=dict(showgrid=True, gridcolor="#eee"),
+                      xaxis=dict(tickangle=-45),
+                      legend=dict(orientation="h", yanchor="bottom", y=1.02),
+                      margin=dict(t=60, b=60))
+    st.plotly_chart(fig, use_container_width=True)
 
-# ── Inkomen ────────────────────────────────────────────────────────────────────
-st.divider()
-st.subheader("Inkomen")
+    # Afwijking
+    ref_opties = []
+    if nl_verd:   ref_opties.append("⌀ Nederland")
+    if stad_verd: ref_opties.append(f"⌀ {woonplaats}")
+    if ref_opties:
+        st.divider()
+        ref_keuze = st.radio("Afwijking t.o.v.:", ref_opties, horizontal=True)
+        ref_verd  = {"⌀ Nederland": nl_verd, f"⌀ {woonplaats}": stad_verd}.get(ref_keuze, nl_verd)
+        st.caption("Positief = hogere concentratie dan referentie, negatief = lager")
+        pct_ref  = pct(ref_verd)
+        afw_data = []
+        for pc in gevonden:
+            p = pct(verdelingen[pc])
+            for lbl in LABELS_VOLGORDE:
+                afw_data.append({"Leeftijdsgroep": lbl,
+                                 "Afwijking (%-punt)": round(p.get(lbl,0)-pct_ref.get(lbl,0),1),
+                                 "Postcode": f"Postcode {pc}"})
+        fig2 = px.bar(pd.DataFrame(afw_data), x="Leeftijdsgroep", y="Afwijking (%-punt)",
+                      color="Postcode", barmode="group",
+                      color_discrete_map={f"Postcode {pc}": COLORS_PC[i%len(COLORS_PC)]
+                                          for i,pc in enumerate(gevonden)}, height=360)
+        fig2.add_hline(y=0, line_color="#333", line_width=1)
+        fig2.update_layout(plot_bgcolor="white", paper_bgcolor="white",
+                           yaxis=dict(showgrid=True, gridcolor="#eee", zeroline=False),
+                           xaxis=dict(tickangle=-45),
+                           legend=dict(orientation="h", yanchor="bottom", y=1.02),
+                           margin=dict(t=60, b=60))
+        st.plotly_chart(fig2, use_container_width=True)
 
-@st.cache_data(ttl=3600)
-def get_inkomen(pc):
-    props    = fetch(f"{INK_BASE}/DataProperties?$format=json")
-    col_inw  = next((p["Key"] for p in props if "PerInwoner"          in p["Key"] and "Gemiddeld" in p.get("Title","")), None)
-    col_ontv = next((p["Key"] for p in props if "PerInkomensontvanger" in p["Key"] and "Gemiddeld" in p.get("Title","")), None)
-    col_med  = next((p["Key"] for p in props if "Mediaan"             in p["Key"]), None)
-    if not any([col_inw, col_ontv, col_med]): return None, {}
-    perioden_i    = fetch(f"{INK_BASE}/Perioden?$format=json")
-    periode_key_i = perioden_i[-1]["Key"]
-    regio_items   = fetch(f"{INK_BASE}/RegioS?$format=json")
-    regio_key     = next((r["Key"] for r in regio_items if r.get("Title","").strip() == pc), None)
-    if not regio_key:
-        regio_key = next((r["Key"] for r in regio_items if r.get("Key","").strip() == f"PO{pc}"), None)
-    if not regio_key: return None, {}
-    select = ",".join(c for c in [col_inw, col_ontv, col_med] if c)
-    obs = fetch(f"{INK_BASE}/TypedDataSet?$format=json"
-                f"&$filter=Perioden eq '{periode_key_i}' and RegioS eq '{regio_key}'"
-                f"&$select={select}")
-    return (obs[0] if obs else None), {"inw":col_inw,"ontv":col_ontv,"med":col_med}
+# ════════════════════════════════════════════════════════════
+with tab2:
+    st.subheader("Huishoudenssamenstelling")
+    with st.spinner("Huishoudensdata ophalen..."):
+        try:
+            hh_per_key, hh_per_title, hh_map, hh_pc_map = get_hh_meta()
 
-ink_cols = st.columns(len(gevonden))
-for i, pc in enumerate(gevonden):
-    with ink_cols[i]:
-        with st.spinner(f"Inkomen {pc}..."):
-            row_i, cols_i = get_inkomen(pc)
-        st.markdown(f"**Postcode {pc}**")
-        if row_i:
-            v1 = row_i.get(cols_i["inw"])  if cols_i.get("inw")  else None
-            v2 = row_i.get(cols_i["ontv"]) if cols_i.get("ontv") else None
-            v3 = row_i.get(cols_i["med"])  if cols_i.get("med")  else None
-            if v1: st.metric("Gem. per inwoner",   f"€ {int(v1*1000):,}".replace(",","."))
-            if v2: st.metric("Gem. per ontvanger", f"€ {int(v2*1000):,}".replace(",","."))
-            if v3: st.metric("Mediaan",            f"€ {int(v3*1000):,}".replace(",","."))
-        else:
-            st.info("Geen data")
+            hh_typen_gewenst = {
+                "Eenpersoonshuishouden": "Alleenstaand",
+                "Meerpersoonshuishouden met kinderen": "Gezin met kinderen",
+                "Meerpersoonshuishouden zonder kinderen": "Stel/meerp. zonder kinderen",
+            }
+
+            hh_resultaten = {}
+            for pc in gevonden:
+                pc_key = hh_pc_map.get(pc)
+                if not pc_key: continue
+                rows = get_hh_data(pc_key, hh_per_key)
+                for row in rows:
+                    hkey  = row.get("Huishoudenssamenstelling","").strip()
+                    titel = hh_map.get(hkey,"")
+                    if titel in hh_typen_gewenst:
+                        label = hh_typen_gewenst[titel]
+                        if pc not in hh_resultaten: hh_resultaten[pc] = {}
+                        hh_resultaten[pc][label] = row.get("ParticuliereHuishoudens_1") or 0
+                    if titel == "Totaal particuliere huishoudens":
+                        if pc not in hh_resultaten: hh_resultaten[pc] = {}
+                        hh_resultaten[pc]["__totaal"] = row.get("ParticuliereHuishoudens_1") or 0
+                        hh_resultaten[pc]["__grootte"] = row.get("GemiddeldeHuishoudensgrootte_2") or 0
+
+            if hh_resultaten:
+                # Kerncijfers
+                hh_cols = st.columns(len(gevonden))
+                for i, pc in enumerate(gevonden):
+                    if pc not in hh_resultaten: continue
+                    with hh_cols[i]:
+                        d = hh_resultaten[pc]
+                        st.markdown(f"<span style='color:{COLORS_PC[i%len(COLORS_PC)]};font-weight:500'>Postcode {pc}</span>",
+                                    unsafe_allow_html=True)
+                        st.metric("Totaal huishoudens", f"{int(d.get('__totaal',0)):,}".replace(",","."))
+                        st.metric("Gem. grootte", f"{d.get('__grootte',0):.1f} pers.")
+
+                st.divider()
+                # Staafgrafiek samenstelling
+                hh_plot = []
+                for pc in gevonden:
+                    if pc not in hh_resultaten: continue
+                    d = hh_resultaten[pc]
+                    tot = d.get("__totaal", 1) or 1
+                    for label in hh_typen_gewenst.values():
+                        hh_plot.append({
+                            "Type": label,
+                            "Percentage": round(d.get(label,0)/tot*100, 1),
+                            "Postcode": f"Postcode {pc}",
+                        })
+
+                fig_hh = px.bar(pd.DataFrame(hh_plot), x="Type", y="Percentage",
+                                color="Postcode", barmode="group",
+                                color_discrete_map={f"Postcode {pc}": COLORS_PC[i%len(COLORS_PC)]
+                                                    for i,pc in enumerate(gevonden)},
+                                labels={"Percentage":"% van huishoudens"}, height=380)
+                fig_hh.update_layout(plot_bgcolor="white", paper_bgcolor="white",
+                                     yaxis=dict(showgrid=True, gridcolor="#eee"),
+                                     legend=dict(orientation="h", yanchor="bottom", y=1.02),
+                                     margin=dict(t=60, b=40))
+                st.plotly_chart(fig_hh, use_container_width=True)
+
+                # Taartdiagrammen per postcode
+                if len(gevonden) <= 3:
+                    pie_cols = st.columns(len(gevonden))
+                    for i, pc in enumerate(gevonden):
+                        if pc not in hh_resultaten: continue
+                        d = hh_resultaten[pc]
+                        pie_data = {k: v for k,v in d.items() if not k.startswith("__")}
+                        fig_pie = px.pie(
+                            names=list(pie_data.keys()),
+                            values=list(pie_data.values()),
+                            title=f"Postcode {pc}",
+                            color_discrete_sequence=["#1D9E75","#185FA5","#BA7517"],
+                            hole=0.4,
+                        )
+                        fig_pie.update_layout(margin=dict(t=40,b=20), height=280)
+                        pie_cols[i].plotly_chart(fig_pie, use_container_width=True)
+            else:
+                st.info("Geen huishoudensdata beschikbaar voor deze postcode(s).")
+        except Exception as e:
+            st.error(f"Fout bij huishoudensdata: {e}")
+
+# ════════════════════════════════════════════════════════════
+with tab3:
+    st.subheader("Herkomst bevolking")
+    with st.spinner("Herkomstdata ophalen..."):
+        try:
+            hk_per_key, hk_per_title, hk_map, gb_totaal, gsl_key, hk_pc_map = get_hk_meta()
+
+            hk_resultaten = {}
+            for pc in gevonden:
+                pc_key = hk_pc_map.get(pc)
+                if not pc_key: continue
+                rows = get_hk_data(pc_key, hk_per_key, gb_totaal, gsl_key, hk_map)
+                if rows: hk_resultaten[pc] = rows
+
+            if hk_resultaten:
+                # Kerncijfers: % Nederland vs Buiten Nederland
+                hk_cols = st.columns(len(gevonden))
+                for i, pc in enumerate(gevonden):
+                    if pc not in hk_resultaten: continue
+                    d = hk_resultaten[pc]
+                    totaal = d.get("Totaal", 1) or 1
+                    with hk_cols[i]:
+                        st.markdown(f"<span style='color:{COLORS_PC[i%len(COLORS_PC)]};font-weight:500'>Postcode {pc}</span>",
+                                    unsafe_allow_html=True)
+                        st.metric("Herkomst Nederland", f"{d.get('Nederland',0)/totaal*100:.1f}%")
+                        st.metric("Herkomst buiten NL", f"{d.get('Buiten Europa',0)/totaal*100 + (1-d.get('Nederland',0)/totaal)*100:.0f}%",
+                                  help="Iedereen met herkomst buiten Nederland")
+
+                st.divider()
+                # Gestapelde staafgrafiek per werelddeel
+                hk_plot = []
+                cat_order = ["Nederland", "Europa (excl. NL)", "Turkije", "Marokko",
+                             "Suriname", "Afrika", "Amerika", "Azië"]
+                for pc in gevonden:
+                    if pc not in hk_resultaten: continue
+                    d = hk_resultaten[pc]
+                    totaal = d.get("Totaal", 1) or 1
+                    for cat in cat_order:
+                        hk_plot.append({
+                            "Herkomst": cat,
+                            "Percentage": round(d.get(cat,0)/totaal*100, 1),
+                            "Postcode": f"Postcode {pc}",
+                        })
+
+                fig_hk = px.bar(pd.DataFrame(hk_plot), x="Postcode", y="Percentage",
+                                color="Herkomst", barmode="stack",
+                                category_orders={"Herkomst": cat_order},
+                                color_discrete_sequence=px.colors.qualitative.Safe,
+                                labels={"Percentage":"% van inwoners"}, height=400)
+                fig_hk.update_layout(plot_bgcolor="white", paper_bgcolor="white",
+                                     yaxis=dict(showgrid=True, gridcolor="#eee"),
+                                     legend=dict(orientation="h", yanchor="bottom", y=1.02),
+                                     margin=dict(t=60, b=40))
+                st.plotly_chart(fig_hk, use_container_width=True)
+
+                # Detailtabel
+                with st.expander("Tabel: aantallen per herkomstcategorie"):
+                    tabel_rows = []
+                    for pc in gevonden:
+                        if pc not in hk_resultaten: continue
+                        d = hk_resultaten[pc]
+                        for cat in cat_order:
+                            tabel_rows.append({"Postcode": pc, "Herkomst": cat,
+                                               "Aantal": d.get(cat,0)})
+                    st.dataframe(pd.DataFrame(tabel_rows), use_container_width=True)
+            else:
+                st.info("Geen herkomstdata beschikbaar voor deze postcode(s).")
+        except Exception as e:
+            st.error(f"Fout bij herkomstdata: {e}")
+
+# ════════════════════════════════════════════════════════════
+with tab4:
+    st.subheader("Inkomen")
+
+    @st.cache_data(ttl=3600)
+    def get_inkomen(pc):
+        props    = fetch(f"{INK_BASE}/DataProperties?$format=json")
+        col_inw  = next((p["Key"] for p in props if "PerInwoner"          in p["Key"] and "Gemiddeld" in p.get("Title","")), None)
+        col_ontv = next((p["Key"] for p in props if "PerInkomensontvanger" in p["Key"] and "Gemiddeld" in p.get("Title","")), None)
+        col_med  = next((p["Key"] for p in props if "Mediaan"             in p["Key"]), None)
+        if not any([col_inw, col_ontv, col_med]): return None, {}
+        perioden_i    = fetch(f"{INK_BASE}/Perioden?$format=json")
+        periode_key_i = perioden_i[-1]["Key"]
+        regio_items   = fetch(f"{INK_BASE}/RegioS?$format=json")
+        regio_key     = next((r["Key"] for r in regio_items if r.get("Title","").strip() == pc), None)
+        if not regio_key:
+            regio_key = next((r["Key"] for r in regio_items if r.get("Key","").strip() == f"PO{pc}"), None)
+        if not regio_key: return None, {}
+        select = ",".join(c for c in [col_inw, col_ontv, col_med] if c)
+        obs = fetch(f"{INK_BASE}/TypedDataSet?$format=json"
+                    f"&$filter=Perioden eq '{periode_key_i}' and RegioS eq '{regio_key}'"
+                    f"&$select={select}")
+        return (obs[0] if obs else None), {"inw":col_inw,"ontv":col_ontv,"med":col_med}
+
+    ink_cols = st.columns(len(gevonden))
+    for i, pc in enumerate(gevonden):
+        with ink_cols[i]:
+            with st.spinner(f"Inkomen {pc}..."):
+                row_i, cols_i = get_inkomen(pc)
+            st.markdown(f"<span style='color:{COLORS_PC[i%len(COLORS_PC)]};font-weight:500'>Postcode {pc}</span>",
+                        unsafe_allow_html=True)
+            if row_i:
+                v1 = row_i.get(cols_i["inw"])  if cols_i.get("inw")  else None
+                v2 = row_i.get(cols_i["ontv"]) if cols_i.get("ontv") else None
+                v3 = row_i.get(cols_i["med"])  if cols_i.get("med")  else None
+                if v1: st.metric("Gem. per inwoner",   f"€ {int(v1*1000):,}".replace(",","."))
+                if v2: st.metric("Gem. per ontvanger", f"€ {int(v2*1000):,}".replace(",","."))
+                if v3: st.metric("Mediaan",            f"€ {int(v3*1000):,}".replace(",","."))
+            else:
+                st.info("Geen data")
 
 st.divider()
 st.caption("Data: CBS StatLine (CC BY 4.0) | Geodata: PDOK Locatieserver | App gebouwd met Streamlit")
