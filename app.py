@@ -21,8 +21,48 @@ def fetch(url):
     return rows
 
 @st.cache_data(ttl=3600)
+def get_regio_key(table, pc):
+    """Haal de exacte RegioS key op voor deze postcode (CBS gebruikt trailing spaces)."""
+    regiolen = fetch(f"{BASE}/{table}/RegioS?$format=json")
+    for r in regiolen:
+        key = r.get("Key", "")
+        title = r.get("Title", "")
+        if key.strip() == f"PO{pc}" or title.strip() == pc:
+            return key  # inclusief trailing spaces!
+    return None
+
+@st.cache_data(ttl=3600)
+def get_plaatsnaam(pc):
+    """Haal plaatsnaam op via gratis postcode API."""
+    try:
+        r = requests.get(f"https://api.postcodeapi.nu/v2/postcodes/{pc}00/", timeout=5)
+        if r.status_code == 200:
+            data = r.json()
+            city = data.get("city", {}).get("label", "")
+            muni = data.get("municipality", {}).get("label", "")
+            if city:
+                return city, muni
+    except Exception:
+        pass
+    # Fallback: probeer een andere gratis bron
+    try:
+        r2 = requests.get(
+            f"https://geodata.nationaalgeoregister.nl/locatieserver/v3/suggest?q={pc}&fq=type:postcode&rows=1",
+            timeout=5
+        )
+        if r2.status_code == 200:
+            docs = r2.json().get("response", {}).get("docs", [])
+            if docs:
+                weergavenaam = docs[0].get("weergavenaam", "")
+                parts = weergavenaam.split(",")
+                if len(parts) >= 2:
+                    return parts[1].strip(), parts[-1].strip()
+    except Exception:
+        pass
+    return None, None
+
+@st.cache_data(ttl=3600)
 def get_column_names(table):
-    """Haal de echte kolomnamen op uit de API zelf."""
     props = fetch(f"{BASE}/{table}/DataProperties?$format=json")
     return [p["Key"] for p in props if p.get("Key")]
 
@@ -35,6 +75,11 @@ def get_latest_period(table):
 def get_leeftijd_data(pc):
     TABLE = "83502NED"
     periode_key, periode_title = get_latest_period(TABLE)
+
+    # Correcte RegioS key ophalen (met eventuele trailing spaces)
+    regio_key = get_regio_key(TABLE, pc)
+    if not regio_key:
+        return None, periode_title, f"Postcode {pc} niet gevonden in CBS-data."
 
     leeftijden_raw = fetch(f"{BASE}/{TABLE}/Leeftijd?$format=json")
     leeftijd_map = {l["Key"].strip(): l["Title"].strip() for l in leeftijden_raw}
@@ -52,21 +97,22 @@ def get_leeftijd_data(pc):
     totaal_g = next(g for g in geslachten_raw if "Totaal" in g["Title"])
     geslacht_key = totaal_g["Key"].strip()
 
-    # Ontdek de juiste kolomnaam automatisch
+    # Kolomnaam automatisch ontdekken
     cols = get_column_names(TABLE)
     bevolking_col = next((c for c in cols if "Bevolking" in c and "Januari" in c), None)
     if not bevolking_col:
         bevolking_col = next((c for c in cols if "Bevolking" in c), None)
     if not bevolking_col:
-        raise ValueError(f"Kon bevolkingskolom niet vinden. Beschikbare kolommen: {cols}")
+        raise ValueError(f"Bevolkingskolom niet gevonden. Beschikbare kolommen: {cols}")
 
     resultaten = []
     for lkey in leeftijd_keys:
+        # Gebruik de exacte regio_key (met trailing spaces) in de filter
         obs = fetch(
             f"{BASE}/{TABLE}/TypedDataSet?$format=json"
             f"&$filter=Perioden eq '{periode_key}'"
-            f" and Geslacht eq '{geslacht_key}'"
-            f" and RegioS eq 'PO{pc}'"
+            f" and Geslacht eq '{geslacht_key.strip()}'"
+            f" and RegioS eq '{regio_key}'"
             f" and Leeftijd eq '{lkey}'"
             f"&$select=Leeftijd,{bevolking_col}"
         )
@@ -76,18 +122,21 @@ def get_leeftijd_data(pc):
             if ltitel in gewenste_titels:
                 resultaten.append({"titel": ltitel, "aantal": aantal})
 
-    return resultaten, periode_title
+    return resultaten, periode_title, None
 
 @st.cache_data(ttl=3600)
 def get_inkomen_data(pc):
     TABLE = "85064NED"
     periode_key, periode_title = get_latest_period(TABLE)
 
-    # Ontdek kolomnamen automatisch
+    regio_key = get_regio_key(TABLE, pc)
+    if not regio_key:
+        return None, periode_title, {}
+
     cols = get_column_names(TABLE)
-    col_per_inw  = next((c for c in cols if "PerInwoner"       in c and "Gemiddeld" in c), None)
+    col_per_inw  = next((c for c in cols if "PerInwoner"          in c and "Gemiddeld" in c), None)
     col_per_ontv = next((c for c in cols if "PerInkomensontvanger" in c and "Gemiddeld" in c), None)
-    col_mediaan  = next((c for c in cols if "Mediaan"          in c and "Inkomen"   in c), None)
+    col_mediaan  = next((c for c in cols if "Mediaan"             in c and "Inkomen"   in c), None)
 
     if not any([col_per_inw, col_per_ontv, col_mediaan]):
         return None, periode_title, {}
@@ -95,14 +144,13 @@ def get_inkomen_data(pc):
     select_cols = ",".join(c for c in [col_per_inw, col_per_ontv, col_mediaan] if c)
     obs = fetch(
         f"{BASE}/{TABLE}/TypedDataSet?$format=json"
-        f"&$filter=Perioden eq '{periode_key}' and RegioS eq 'PO{pc}'"
+        f"&$filter=Perioden eq '{periode_key}' and RegioS eq '{regio_key}'"
         f"&$select={select_cols}"
     )
     col_names = {"per_inw": col_per_inw, "per_ontv": col_per_ontv, "mediaan": col_mediaan}
     return (obs[0] if obs else None), periode_title, col_names
 
 
-# Labels en gewichten
 LABEL_MAP = {
     "0 tot 5 jaar": "0-5",     "5 tot 10 jaar": "5-10",   "10 tot 15 jaar": "10-15",
     "15 tot 20 jaar": "15-20", "20 tot 25 jaar": "20-25", "25 tot 30 jaar": "25-30",
@@ -133,14 +181,24 @@ if not postcode_input.isdigit() or len(postcode_input) != 4:
     st.stop()
 
 pc = postcode_input.strip()
-st.header(f"Postcode {pc}")
+
+# Plaatsnaam ophalen
+stad, gemeente = get_plaatsnaam(pc)
+if stad:
+    locatie_label = f"{stad} ({gemeente})" if gemeente and gemeente != stad else stad
+    st.header(f"Postcode {pc} — {locatie_label}")
+else:
+    st.header(f"Postcode {pc}")
 
 # ── Leeftijdsopbouw ────────────────────────────────────────────────────────────
 with st.spinner("Leeftijdsdata ophalen..."):
     try:
-        raw, periode_title = get_leeftijd_data(pc)
+        result = get_leeftijd_data(pc)
+        raw, periode_title, foutmelding = result
 
-        if not raw or all(r["aantal"] == 0 for r in raw):
+        if foutmelding:
+            st.warning(foutmelding)
+        elif not raw or all(r["aantal"] == 0 for r in raw):
             st.warning(f"Geen leeftijdsdata gevonden voor postcode {pc}.")
         else:
             df = pd.DataFrame([
@@ -154,7 +212,7 @@ with st.spinner("Leeftijdsdata ophalen..."):
             oud  = df[df["Leeftijdsgroep"].isin(["65-70","70-75","75-80","80-85","85-90","90+"])]["Aantal"].sum()
 
             m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Inwoners",      f"{totaal:,}".replace(",", "."))
+            m1.metric("Inwoners",      f"{int(totaal):,}".replace(",", "."))
             m2.metric("Gem. leeftijd", f"{gem:.1f} jaar")
             m3.metric("Aandeel 65+",  f"{oud/totaal*100:.1f}%")
             m4.metric("Aandeel 0-25", f"{jong/totaal*100:.1f}%")
@@ -190,12 +248,12 @@ with st.spinner("Inkomendata ophalen..."):
         if row_i and col_names:
             st.subheader(f"Inkomen — {periode_title_i}")
             ic1, ic2, ic3 = st.columns(3)
-            if col_names["per_inw"] and row_i.get(col_names["per_inw"]):
-                ic1.metric("Gem. inkomen per inwoner",   f"€ {int(row_i[col_names['per_inw']]  * 1000):,}".replace(",","."))
-            if col_names["per_ontv"] and row_i.get(col_names["per_ontv"]):
-                ic2.metric("Gem. inkomen per ontvanger", f"€ {int(row_i[col_names['per_ontv']] * 1000):,}".replace(",","."))
-            if col_names["mediaan"] and row_i.get(col_names["mediaan"]):
-                ic3.metric("Mediaan inkomen",            f"€ {int(row_i[col_names['mediaan']]  * 1000):,}".replace(",","."))
+            v1 = row_i.get(col_names["per_inw"])  if col_names.get("per_inw")  else None
+            v2 = row_i.get(col_names["per_ontv"]) if col_names.get("per_ontv") else None
+            v3 = row_i.get(col_names["mediaan"])  if col_names.get("mediaan")  else None
+            if v1: ic1.metric("Gem. inkomen per inwoner",   f"€ {int(v1 * 1000):,}".replace(",","."))
+            if v2: ic2.metric("Gem. inkomen per ontvanger", f"€ {int(v2 * 1000):,}".replace(",","."))
+            if v3: ic3.metric("Mediaan inkomen",            f"€ {int(v3 * 1000):,}".replace(",","."))
         else:
             st.info("Geen inkomendata beschikbaar voor deze postcode.")
     except Exception as e:
