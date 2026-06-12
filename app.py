@@ -8,7 +8,7 @@ st.set_page_config(page_title="Postcode Vergelijker", page_icon="📍", layout="
 st.title("📍 Postcode Demografische Vergelijker")
 st.caption("Bron: CBS StatLine 83502NED — open data (CC BY 4.0)")
 
-BASE    = "https://opendata.cbs.nl/ODataApi/OData/83502NED"
+BASE     = "https://opendata.cbs.nl/ODataApi/OData/83502NED"
 INK_BASE = "https://opendata.cbs.nl/ODataApi/OData/85064NED"
 
 LABEL_MAP = {
@@ -28,41 +28,9 @@ GEWICHTEN = {
     "50-55":52.5,"55-60":57.5,"60-65":62.5,"65-70":67.5,"70-75":72.5,
     "75-80":77.5,"80-85":82.5,"85-90":87.5,"90+":92.5,
 }
-
 COLORS_PC  = ["#1D9E75","#534AB7","#D85A30","#378ADD","#993556"]
 COLOR_STAD = "#185FA5"
-COLOR_PROV = "#BA7517"
 COLOR_NL   = "#888780"
-
-# ── Postcode → provincie mapping (vaste ranges, geen API nodig) ────────────────
-# Gebaseerd op officiële CBS/PostNL postcodegebieden per provincie
-PROVINCIE_RANGES = {
-    "Groningen":      [(9600, 9999)],
-    "Friesland":      [(8400, 8599), (8700, 8999), (9200, 9299), (9300, 9399)],
-    "Drenthe":        [(7800, 7999), (9300, 9399), (9400, 9599)],
-    "Overijssel":     [(7400, 7799), (8000, 8099)],
-    "Flevoland":      [(1300, 1399), (8200, 8259)],
-    "Gelderland":     [(4000, 4099), (6500, 6599), (6600, 6699), (6700, 6799),
-                       (6800, 6899), (6900, 6999), (7000, 7399)],
-    "Utrecht":        [(3400, 3799)],
-    "Noord-Holland":  [(1000, 1299), (1400, 1999), (2000, 2099)],
-    "Zuid-Holland":   [(2200, 2999), (3000, 3399)],
-    "Zeeland":        [(4300, 4599)],
-    "Noord-Brabant":  [(4600, 4999), (5000, 5599)],
-    "Limburg":        [(5900, 5999), (6000, 6499)],
-}
-
-def postcode_naar_provincie(pc: str) -> str:
-    """Geef de provincie terug op basis van het 4-cijferig postcodegebied."""
-    try:
-        num = int(pc)
-    except ValueError:
-        return "Onbekend"
-    for prov, ranges in PROVINCIE_RANGES.items():
-        for lo, hi in ranges:
-            if lo <= num <= hi:
-                return prov
-    return "Onbekend"
 
 # ── CBS helpers ────────────────────────────────────────────────────────────────
 @st.cache_data(ttl=3600)
@@ -78,16 +46,16 @@ def fetch(url):
 
 @st.cache_data(ttl=3600)
 def get_meta():
-    perioden     = fetch(f"{BASE}/Perioden?$format=json")
-    periode_key  = perioden[-1]["Key"]
-    periode_title= perioden[-1]["Title"].strip()
-    leeftijden   = fetch(f"{BASE}/Leeftijd?$format=json")
-    leeftijd_map = {l["Key"].strip(): l["Title"].strip() for l in leeftijden}
-    leeftijd_keys= [k for k,v in leeftijd_map.items() if v in GEWENSTE]
-    geslachten   = fetch(f"{BASE}/Geslacht?$format=json")
-    geslacht_key = next(g["Key"] for g in geslachten if "Totaal" in g["Title"])
-    alle_pc      = fetch(f"{BASE}/Postcode?$format=json")
-    pc_key_map   = {item["Title"].strip(): item["Key"] for item in alle_pc}
+    perioden      = fetch(f"{BASE}/Perioden?$format=json")
+    periode_key   = perioden[-1]["Key"]
+    periode_title = perioden[-1]["Title"].strip()
+    leeftijden    = fetch(f"{BASE}/Leeftijd?$format=json")
+    leeftijd_map  = {l["Key"].strip(): l["Title"].strip() for l in leeftijden}
+    leeftijd_keys = [k for k,v in leeftijd_map.items() if v in GEWENSTE]
+    geslachten    = fetch(f"{BASE}/Geslacht?$format=json")
+    geslacht_key  = next(g["Key"] for g in geslachten if "Totaal" in g["Title"])
+    alle_pc       = fetch(f"{BASE}/Postcode?$format=json")
+    pc_key_map    = {item["Title"].strip(): item["Key"] for item in alle_pc}
     return periode_key, periode_title, leeftijd_map, leeftijd_keys, geslacht_key, pc_key_map
 
 @st.cache_data(ttl=3600)
@@ -108,7 +76,7 @@ def get_verd(pc_key, periode_key, geslacht_key, leeftijd_keys, leeftijd_map):
                 resultaten[label] = resultaten.get(label,0) + (row.get("Bevolking_1") or 0)
     return resultaten
 
-# ── PDOK — alleen voor stad (klein aantal postcodes) ──────────────────────────
+# ── PDOK helpers ───────────────────────────────────────────────────────────────
 @st.cache_data(ttl=3600)
 def get_locatie(pc):
     try:
@@ -171,7 +139,7 @@ def pct(verd):
     tot = sum(verd.values())
     return {k: v/tot*100 for k,v in verd.items()} if tot else {}
 
-# ── UI ─────────────────────────────────────────────────────────────────────────
+# ── Input ──────────────────────────────────────────────────────────────────────
 col_in, _ = st.columns([2,2])
 with col_in:
     invoer = st.text_input("Postcodes (komma-gescheiden)",
@@ -194,36 +162,23 @@ with st.spinner("CBS metadata laden..."):
 with st.spinner("Locatie detecteren..."):
     woonplaats, gemeente = get_locatie(pcs[0])
 
-# Provincie via lokale lookup — geen API nodig
-provincie = postcode_naar_provincie(pcs[0])
-
 titel = f"Analyse voor {woonplaats}" if woonplaats else f"Analyse voor {', '.join(pcs)}"
 if gemeente and gemeente != woonplaats:
     titel += f" (gemeente {gemeente})"
 st.subheader(titel)
 
-# Stad-postcodes ophalen (PDOK, beperkt aantal)
+# Stad-postcodes ophalen
 stad_pcs = []
 if woonplaats:
     with st.spinner(f"Postcodes van {woonplaats} ophalen..."):
         stad_pcs = get_postcodes_van_stad(woonplaats)
 
-# Provincie-postcodes via lokale lookup — direct, geen API
-prov_pcs = [pc for pc in pc_key_map.keys()
-            if pc.isdigit() and len(pc) == 4
-            and postcode_naar_provincie(pc) == provincie]
+st.caption(f"Peiljaar: {periode_title} | {woonplaats}: {len(stad_pcs)} postcodes | Nederland: CBS totaalcijfer")
 
-st.caption(
-    f"Peiljaar: {periode_title} | "
-    f"Stad ({woonplaats}): {len(stad_pcs)} postcodes | "
-    f"Provincie ({provincie}): {len(prov_pcs)} postcodes | "
-    f"Nederland: CBS totaalcijfer"
-)
-
-# Data ophalen — alleen unieke postcodes die we nog niet hebben
-alle_nodig = list(set(pcs + stad_pcs))  # provincie & NL komen via aparte keys
+# Data ophalen — postcodes + stad
+alle_nodig = list(set(pcs + stad_pcs))
 verdelingen = {}
-progress = st.progress(0, text="Postcode data ophalen...")
+progress = st.progress(0, text="Data ophalen...")
 for i, pc in enumerate(alle_nodig):
     progress.progress((i+1)/len(alle_nodig), text=f"Postcode {pc}...")
     key = pc_key_map.get(pc)
@@ -231,28 +186,12 @@ for i, pc in enumerate(alle_nodig):
     v = get_verd(key, periode_key, geslacht_key, leeftijd_keys, leeftijd_map)
     if v: verdelingen[pc] = v
 
-# Nederland via NL01 (één API-call)
+# Nederland via NL01 — één call
 nl_verd = {}
 with st.spinner("Nederland ophalen..."):
     nl_key = pc_key_map.get("Nederland")
     if nl_key:
         nl_verd = get_verd(nl_key, periode_key, geslacht_key, leeftijd_keys, leeftijd_map)
-
-# Provincie: alle bekende postcodes combineren die al in CBS zitten
-prov_verd = {}
-with st.spinner(f"{provincie} berekenen..."):
-    prov_verds = []
-    for pc in prov_pcs:
-        if pc in verdelingen:
-            prov_verds.append(verdelingen[pc])
-        else:
-            key = pc_key_map.get(pc)
-            if key:
-                v = get_verd(key, periode_key, geslacht_key, leeftijd_keys, leeftijd_map)
-                if v:
-                    verdelingen[pc] = v
-                    prov_verds.append(v)
-    prov_verd = combineer(prov_verds)
 
 progress.empty()
 
@@ -269,8 +208,6 @@ for i, pc in enumerate(gevonden):
     benchmarks.append((f"Postcode {pc}", verdelingen[pc], COLORS_PC[i % len(COLORS_PC)]))
 if stad_verd:
     benchmarks.append((f"⌀ {woonplaats}", stad_verd, COLOR_STAD))
-if prov_verd:
-    benchmarks.append((f"⌀ {provincie}", prov_verd, COLOR_PROV))
 if nl_verd:
     benchmarks.append(("⌀ Nederland", nl_verd, COLOR_NL))
 
@@ -289,7 +226,7 @@ for i, (label, verd, kleur) in enumerate(benchmarks):
             st.metric("Aandeel 65+",  f"{s['p65']:.1f}%")
             st.metric("Aandeel 0-25", f"{s['p025']:.1f}%")
 
-# ── Leeftijdsopbouw ────────────────────────────────────────────────────────────
+# ── Leeftijdsopbouw vergelijking ───────────────────────────────────────────────
 st.divider()
 st.subheader("Leeftijdsopbouw vergelijking")
 kleurmap      = {lbl: klr for lbl,_,klr in benchmarks}
@@ -317,14 +254,12 @@ st.plotly_chart(fig, use_container_width=True)
 # ── Afwijkingsgrafiek ──────────────────────────────────────────────────────────
 ref_opties = []
 if nl_verd:   ref_opties.append("⌀ Nederland")
-if prov_verd: ref_opties.append(f"⌀ {provincie}")
 if stad_verd: ref_opties.append(f"⌀ {woonplaats}")
 
 if ref_opties:
     st.divider()
     ref_keuze = st.radio("Afwijking t.o.v.:", ref_opties, horizontal=True)
     ref_verd  = {"⌀ Nederland": nl_verd,
-                 f"⌀ {provincie}": prov_verd,
                  f"⌀ {woonplaats}": stad_verd}.get(ref_keuze, nl_verd)
     st.caption("Positief = hogere concentratie dan referentie, negatief = lager")
 
