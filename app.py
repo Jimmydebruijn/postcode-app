@@ -359,74 +359,93 @@ with tab2:
                 "Meerpersoonshuishouden zonder kinderen": "Stel/meerp. zonder kinderen",
             }
 
+            def parse_hh_rows(rows, hh_map, hh_typen_gewenst):
+                d = {}
+                for row in rows:
+                    hkey  = row.get("Huishoudenssamenstelling","").strip()
+                    titel = hh_map.get(hkey,"")
+                    if titel in hh_typen_gewenst:
+                        d[hh_typen_gewenst[titel]] = row.get("ParticuliereHuishoudens_1") or 0
+                    if titel == "Totaal particuliere huishoudens":
+                        d["__totaal"]  = row.get("ParticuliereHuishoudens_1") or 0
+                        d["__grootte"] = row.get("GemiddeldeHuishoudensgrootte_2") or 0
+                return d
+
+            # Postcodes ophalen
             hh_resultaten = {}
             for pc in gevonden:
                 pc_key = hh_pc_map.get(pc)
                 if not pc_key: continue
                 rows = get_hh_data(pc_key, hh_per_key)
-                for row in rows:
-                    hkey  = row.get("Huishoudenssamenstelling","").strip()
-                    titel = hh_map.get(hkey,"")
-                    if titel in hh_typen_gewenst:
-                        label = hh_typen_gewenst[titel]
-                        if pc not in hh_resultaten: hh_resultaten[pc] = {}
-                        hh_resultaten[pc][label] = row.get("ParticuliereHuishoudens_1") or 0
-                    if titel == "Totaal particuliere huishoudens":
-                        if pc not in hh_resultaten: hh_resultaten[pc] = {}
-                        hh_resultaten[pc]["__totaal"] = row.get("ParticuliereHuishoudens_1") or 0
-                        hh_resultaten[pc]["__grootte"] = row.get("GemiddeldeHuishoudensgrootte_2") or 0
+                if rows: hh_resultaten[pc] = parse_hh_rows(rows, hh_map, hh_typen_gewenst)
+
+            # Nederland ophalen
+            nl_hh = {}
+            nl_hh_key = hh_pc_map.get("Nederland")
+            if nl_hh_key:
+                nl_rows = get_hh_data(nl_hh_key, hh_per_key)
+                if nl_rows: nl_hh = parse_hh_rows(nl_rows, hh_map, hh_typen_gewenst)
 
             if hh_resultaten:
-                # Kerncijfers
-                hh_cols = st.columns(len(gevonden))
-                for i, pc in enumerate(gevonden):
-                    if pc not in hh_resultaten: continue
+                # Kerncijfers — postcodes + NL naast elkaar
+                alle_labels = list(gevonden) + (["⌀ Nederland"] if nl_hh else [])
+                hh_cols = st.columns(len(alle_labels))
+                for i, label in enumerate(alle_labels):
+                    is_nl = label == "⌀ Nederland"
+                    d = nl_hh if is_nl else hh_resultaten.get(label.replace("Postcode ","") if " " in label else label, {})
+                    pc_i = label if is_nl else gevonden[i] if i < len(gevonden) else label
+                    kleur = COLOR_NL if is_nl else COLORS_PC[i % len(COLORS_PC)]
                     with hh_cols[i]:
-                        d = hh_resultaten[pc]
-                        st.markdown(f"<span style='color:{COLORS_PC[i%len(COLORS_PC)]};font-weight:500'>Postcode {pc}</span>",
+                        st.markdown(f"<span style='color:{kleur};font-weight:500'>{label if is_nl else f'Postcode {pc_i}'}</span>",
                                     unsafe_allow_html=True)
                         st.metric("Totaal huishoudens", f"{int(d.get('__totaal',0)):,}".replace(",","."))
                         st.metric("Gem. grootte", f"{d.get('__grootte',0):.1f} pers.")
 
                 st.divider()
-                # Staafgrafiek samenstelling
+                # Staafgrafiek — postcodes + NL
                 hh_plot = []
-                for pc in gevonden:
+                reeksen = []
+                kleurmap_hh = {}
+                for i, pc in enumerate(gevonden):
                     if pc not in hh_resultaten: continue
                     d = hh_resultaten[pc]
                     tot = d.get("__totaal", 1) or 1
-                    for label in hh_typen_gewenst.values():
-                        hh_plot.append({
-                            "Type": label,
-                            "Percentage": round(d.get(label,0)/tot*100, 1),
-                            "Postcode": f"Postcode {pc}",
-                        })
+                    label = f"Postcode {pc}"
+                    reeksen.append(label)
+                    kleurmap_hh[label] = COLORS_PC[i % len(COLORS_PC)]
+                    for typ in hh_typen_gewenst.values():
+                        hh_plot.append({"Type": typ, "Percentage": round(d.get(typ,0)/tot*100,1), "Reeks": label})
+
+                if nl_hh:
+                    tot_nl = nl_hh.get("__totaal", 1) or 1
+                    reeksen.append("⌀ Nederland")
+                    kleurmap_hh["⌀ Nederland"] = COLOR_NL
+                    for typ in hh_typen_gewenst.values():
+                        hh_plot.append({"Type": typ, "Percentage": round(nl_hh.get(typ,0)/tot_nl*100,1), "Reeks": "⌀ Nederland"})
 
                 fig_hh = px.bar(pd.DataFrame(hh_plot), x="Type", y="Percentage",
-                                color="Postcode", barmode="group",
-                                color_discrete_map={f"Postcode {pc}": COLORS_PC[i%len(COLORS_PC)]
-                                                    for i,pc in enumerate(gevonden)},
-                                labels={"Percentage":"% van huishoudens"}, height=380)
+                                color="Reeks", barmode="group",
+                                color_discrete_map=kleurmap_hh,
+                                category_orders={"Reeks": reeksen},
+                                labels={"Percentage":"% van huishoudens"}, height=400)
                 fig_hh.update_layout(plot_bgcolor="white", paper_bgcolor="white",
                                      yaxis=dict(showgrid=True, gridcolor="#eee"),
                                      legend=dict(orientation="h", yanchor="bottom", y=1.02),
                                      margin=dict(t=60, b=40))
                 st.plotly_chart(fig_hh, use_container_width=True)
 
-                # Taartdiagrammen per postcode
-                if len(gevonden) <= 3:
-                    pie_cols = st.columns(len(gevonden))
-                    for i, pc in enumerate(gevonden):
+                # Taartdiagrammen per postcode (max 3)
+                pie_targets = gevonden[:3]
+                if pie_targets:
+                    pie_cols = st.columns(len(pie_targets))
+                    for i, pc in enumerate(pie_targets):
                         if pc not in hh_resultaten: continue
                         d = hh_resultaten[pc]
                         pie_data = {k: v for k,v in d.items() if not k.startswith("__")}
-                        fig_pie = px.pie(
-                            names=list(pie_data.keys()),
-                            values=list(pie_data.values()),
-                            title=f"Postcode {pc}",
-                            color_discrete_sequence=["#1D9E75","#185FA5","#BA7517"],
-                            hole=0.4,
-                        )
+                        fig_pie = px.pie(names=list(pie_data.keys()), values=list(pie_data.values()),
+                                         title=f"Postcode {pc}",
+                                         color_discrete_sequence=["#1D9E75","#185FA5","#BA7517"],
+                                         hole=0.4)
                         fig_pie.update_layout(margin=dict(t=40,b=20), height=280)
                         pie_cols[i].plotly_chart(fig_pie, use_container_width=True)
             else:
@@ -440,6 +459,8 @@ with tab3:
     with st.spinner("Herkomstdata ophalen..."):
         try:
             hk_per_key, hk_per_title, hk_map, gb_totaal, gsl_key, hk_pc_map = get_hk_meta()
+            cat_order = ["Nederland", "Europa (excl. NL)", "Turkije", "Marokko",
+                         "Suriname", "Afrika", "Amerika", "Azië"]
 
             hk_resultaten = {}
             for pc in gevonden:
@@ -448,41 +469,57 @@ with tab3:
                 rows = get_hk_data(pc_key, hk_per_key, gb_totaal, gsl_key, hk_map)
                 if rows: hk_resultaten[pc] = rows
 
+            # Nederland ophalen
+            nl_hk = {}
+            nl_hk_key = hk_pc_map.get("Nederland")
+            if nl_hk_key:
+                nl_hk = get_hk_data(nl_hk_key, hk_per_key, gb_totaal, gsl_key, hk_map)
+
             if hk_resultaten:
-                # Kerncijfers: % Nederland vs Buiten Nederland
-                hk_cols = st.columns(len(gevonden))
-                for i, pc in enumerate(gevonden):
-                    if pc not in hk_resultaten: continue
-                    d = hk_resultaten[pc]
+                # Kerncijfers — postcodes + NL
+                alle_hk_labels = list(gevonden) + (["⌀ Nederland"] if nl_hk else [])
+                hk_cols = st.columns(len(alle_hk_labels))
+                for i, label in enumerate(alle_hk_labels):
+                    is_nl = label == "⌀ Nederland"
+                    d = nl_hk if is_nl else hk_resultaten.get(label, {})
+                    kleur = COLOR_NL if is_nl else COLORS_PC[i % len(COLORS_PC)]
                     totaal = d.get("Totaal", 1) or 1
+                    pct_nl_herkomst = d.get("Nederland",0)/totaal*100
+                    pct_buiten = 100 - pct_nl_herkomst
                     with hk_cols[i]:
-                        st.markdown(f"<span style='color:{COLORS_PC[i%len(COLORS_PC)]};font-weight:500'>Postcode {pc}</span>",
+                        naam = "⌀ Nederland" if is_nl else f"Postcode {label}"
+                        st.markdown(f"<span style='color:{kleur};font-weight:500'>{naam}</span>",
                                     unsafe_allow_html=True)
-                        st.metric("Herkomst Nederland", f"{d.get('Nederland',0)/totaal*100:.1f}%")
-                        st.metric("Herkomst buiten NL", f"{d.get('Buiten Europa',0)/totaal*100 + (1-d.get('Nederland',0)/totaal)*100:.0f}%",
-                                  help="Iedereen met herkomst buiten Nederland")
+                        # Delta alleen voor postcodes t.o.v. NL
+                        nl_pct_ref = nl_hk.get("Nederland",0)/(nl_hk.get("Totaal",1) or 1)*100 if nl_hk and not is_nl else None
+                        delta_str = f"{pct_nl_herkomst - nl_pct_ref:+.1f}%-pt vs NL" if nl_pct_ref is not None else None
+                        st.metric("Herkomst Nederland", f"{pct_nl_herkomst:.1f}%", delta=delta_str)
+                        st.metric("Herkomst buiten NL", f"{pct_buiten:.1f}%")
 
                 st.divider()
-                # Gestapelde staafgrafiek per werelddeel
+                # Gestapelde staafgrafiek — postcodes + NL
                 hk_plot = []
-                cat_order = ["Nederland", "Europa (excl. NL)", "Turkije", "Marokko",
-                             "Suriname", "Afrika", "Amerika", "Azië"]
+                stacked_labels = []
                 for pc in gevonden:
                     if pc not in hk_resultaten: continue
                     d = hk_resultaten[pc]
                     totaal = d.get("Totaal", 1) or 1
+                    lbl = f"Postcode {pc}"
+                    stacked_labels.append(lbl)
                     for cat in cat_order:
-                        hk_plot.append({
-                            "Herkomst": cat,
-                            "Percentage": round(d.get(cat,0)/totaal*100, 1),
-                            "Postcode": f"Postcode {pc}",
-                        })
+                        hk_plot.append({"Herkomst": cat, "Percentage": round(d.get(cat,0)/totaal*100,1), "Gebied": lbl})
 
-                fig_hk = px.bar(pd.DataFrame(hk_plot), x="Postcode", y="Percentage",
+                if nl_hk:
+                    totaal_nl = nl_hk.get("Totaal", 1) or 1
+                    stacked_labels.append("⌀ Nederland")
+                    for cat in cat_order:
+                        hk_plot.append({"Herkomst": cat, "Percentage": round(nl_hk.get(cat,0)/totaal_nl*100,1), "Gebied": "⌀ Nederland"})
+
+                fig_hk = px.bar(pd.DataFrame(hk_plot), x="Gebied", y="Percentage",
                                 color="Herkomst", barmode="stack",
-                                category_orders={"Herkomst": cat_order},
+                                category_orders={"Herkomst": cat_order, "Gebied": stacked_labels},
                                 color_discrete_sequence=px.colors.qualitative.Safe,
-                                labels={"Percentage":"% van inwoners"}, height=400)
+                                labels={"Percentage":"% van inwoners"}, height=420)
                 fig_hk.update_layout(plot_bgcolor="white", paper_bgcolor="white",
                                      yaxis=dict(showgrid=True, gridcolor="#eee"),
                                      legend=dict(orientation="h", yanchor="bottom", y=1.02),
@@ -490,14 +527,21 @@ with tab3:
                 st.plotly_chart(fig_hk, use_container_width=True)
 
                 # Detailtabel
-                with st.expander("Tabel: aantallen per herkomstcategorie"):
+                with st.expander("Tabel: percentages per herkomstcategorie"):
                     tabel_rows = []
                     for pc in gevonden:
                         if pc not in hk_resultaten: continue
                         d = hk_resultaten[pc]
+                        tot = d.get("Totaal",1) or 1
                         for cat in cat_order:
-                            tabel_rows.append({"Postcode": pc, "Herkomst": cat,
-                                               "Aantal": d.get(cat,0)})
+                            row = {"Gebied": f"Postcode {pc}", "Herkomst": cat,
+                                   "Aantal": d.get(cat,0), "%": round(d.get(cat,0)/tot*100,1)}
+                            tabel_rows.append(row)
+                    if nl_hk:
+                        tot_nl = nl_hk.get("Totaal",1) or 1
+                        for cat in cat_order:
+                            tabel_rows.append({"Gebied": "⌀ Nederland", "Herkomst": cat,
+                                               "Aantal": nl_hk.get(cat,0), "%": round(nl_hk.get(cat,0)/tot_nl*100,1)})
                     st.dataframe(pd.DataFrame(tabel_rows), use_container_width=True)
             else:
                 st.info("Geen herkomstdata beschikbaar voor deze postcode(s).")
