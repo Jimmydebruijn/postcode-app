@@ -1,3 +1,6 @@
+bash
+
+cat > /home/claude/app.py << 'ENDOFFILE'
 import streamlit as st
 import requests
 import pandas as pd
