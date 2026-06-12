@@ -1,3 +1,4 @@
+import re
 import streamlit as st
 import requests
 import pandas as pd
@@ -22,16 +23,14 @@ def fetch(url):
 
 @st.cache_data(ttl=3600)
 def get_postcode_key(pc):
-    """Zoek de exacte CBS-sleutel op voor een postcode (bijv. 'PC2011  ')."""
     alle = fetch(f"{BASE}/83502NED/Postcode?$format=json")
     for item in alle:
         if item.get("Title", "").strip() == pc:
-            return item["Key"]  # inclusief trailing spaces
+            return item["Key"]
     return None
 
 @st.cache_data(ttl=3600)
 def get_plaatsnaam(pc):
-    """Haal plaatsnaam op via de gratis PDOK Locatieserver."""
     try:
         r = requests.get(
             "https://api.pdok.nl/bzk/locatieserver/search/v3_1/suggest",
@@ -42,9 +41,13 @@ def get_plaatsnaam(pc):
             docs = r.json().get("response", {}).get("docs", [])
             if docs:
                 naam = docs[0].get("weergavenaam", "")
-                # Formaat: "1234, Plaatsnaam" of "1234AB Plaatsnaam, Gemeente"
+                # Haal alleen de plaatsnaam op, niet de 6-cijferige postcode
+                # Formaat: "2011JM Haarlem" → geef "Haarlem" terug
+                match = re.search(r'\d{4}[A-Z]{2}\s+(.*)', naam)
+                if match:
+                    return match.group(1).strip()
+                # Fallback: neem deel na komma
                 parts = [p.strip() for p in naam.split(",")]
-                # Pak het tweede deel als plaatsnaam
                 if len(parts) >= 2:
                     return parts[1].strip()
     except Exception:
@@ -53,7 +56,6 @@ def get_plaatsnaam(pc):
 
 @st.cache_data(ttl=3600)
 def get_leeftijd_data(pc_key, periode_key):
-    """Haal leeftijdsdata op voor één postcode."""
     leeftijden_raw = fetch(f"{BASE}/83502NED/Leeftijd?$format=json")
     leeftijd_map = {l["Key"].strip(): l["Title"].strip() for l in leeftijden_raw}
 
@@ -68,7 +70,7 @@ def get_leeftijd_data(pc_key, periode_key):
 
     geslachten_raw = fetch(f"{BASE}/83502NED/Geslacht?$format=json")
     totaal_g = next(g for g in geslachten_raw if "Totaal" in g["Title"])
-    geslacht_key = totaal_g["Key"]  # bewaar trailing spaces
+    geslacht_key = totaal_g["Key"]
 
     resultaten = []
     for lkey in leeftijd_keys:
@@ -90,8 +92,6 @@ def get_leeftijd_data(pc_key, periode_key):
 
 @st.cache_data(ttl=3600)
 def get_inkomen_data(pc, periode_key_i):
-    """Haal inkomendata op. Tabel 85064NED gebruikt RegioS met 'PO'-prefix."""
-    # Controleer beschikbare kolomnamen
     props = fetch(f"{BASE}/85064NED/DataProperties?$format=json")
     col_inw  = next((p["Key"] for p in props if "PerInwoner"          in p["Key"] and "Gemiddeld" in p.get("Title","")), None)
     col_ontv = next((p["Key"] for p in props if "PerInkomensontvanger" in p["Key"] and "Gemiddeld" in p.get("Title","")), None)
@@ -100,11 +100,9 @@ def get_inkomen_data(pc, periode_key_i):
     if not any([col_inw, col_ontv, col_med]):
         return None, {}
 
-    # Zoek de juiste RegioS-key in tabel 85064NED
     regio_items = fetch(f"{BASE}/85064NED/RegioS?$format=json")
     regio_key = next((r["Key"] for r in regio_items if r.get("Title","").strip() == pc), None)
     if not regio_key:
-        # Probeer met PO-prefix
         regio_key = next((r["Key"] for r in regio_items if r.get("Key","").strip() == f"PO{pc}"), None)
     if not regio_key:
         return None, {}
@@ -152,13 +150,15 @@ pc = postcode_input.strip()
 # Plaatsnaam + header
 plaatsnaam = get_plaatsnaam(pc)
 st.header(f"Postcode {pc}" + (f" — {plaatsnaam}" if plaatsnaam else ""))
+if plaatsnaam:
+    st.caption(f"Cijfers gelden voor alle adressen binnen het 4-cijferig gebied {pc} (dus {pc}AA t/m {pc}ZZ samen)")
 
-# Meest recente periode ophalen
-perioden = fetch(f"{BASE}/83502NED/Perioden?$format=json")
+# Meest recente periode
+perioden      = fetch(f"{BASE}/83502NED/Perioden?$format=json")
 periode_key   = perioden[-1]["Key"]
 periode_title = perioden[-1]["Title"].strip()
 
-# Postcode-sleutel ophalen
+# Postcode-sleutel
 with st.spinner("Postcode opzoeken..."):
     pc_key = get_postcode_key(pc)
 
@@ -213,7 +213,7 @@ st.divider()
 # ── Inkomen ────────────────────────────────────────────────────────────────────
 with st.spinner("Inkomendata ophalen..."):
     try:
-        perioden_i   = fetch(f"{BASE}/85064NED/Perioden?$format=json")
+        perioden_i      = fetch(f"{BASE}/85064NED/Perioden?$format=json")
         periode_key_i   = perioden_i[-1]["Key"]
         periode_title_i = perioden_i[-1]["Title"].strip()
 
